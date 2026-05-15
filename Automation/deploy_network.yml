@@ -1,0 +1,175 @@
+---
+- name: Enterprise VLAN & Security Deployment
+  hosts: network_devices
+  gather_facts: no
+  connection: network_cli
+
+  vars:
+    ansible_user: admin
+    ansible_password: Netsec112211
+    ansible_become: yes
+    ansible_become_method: enable
+
+  tasks:
+    # ==========================================
+    # SWITCH CONFIGURATION (2960-24TT)
+    # ==========================================
+    - name: "[SWITCH] Configure Hostname"
+      ios_config:
+        lines:
+          - hostname SW-ACCESS-01
+      when: inventory_hostname == "switch"
+
+    - name: "[SWITCH] Create VLANs"
+      ios_config:
+        lines:
+          - "vlan {{ item.id }}"
+          - "name {{ item.name }}"
+      loop:
+        - { id: 10, name: HR }
+        - { id: 20, name: IT }
+        - { id: 30, name: Finance }
+        - { id: 40, name: Management }
+      when: inventory_hostname == "switch"
+
+    - name: "[SWITCH] Configure Access Ports"
+      ios_config:
+        parents: "interface {{ item.port }}"
+        lines:
+          - "description {{ item.desc }}"
+          - "switchport mode access"
+          - "switchport access vlan {{ item.vlan }}"
+          - "spanning-tree portfast"
+      loop:
+        - { port: "fastEthernet 0/1", desc: "HR-PC", vlan: 10 }
+        - { port: "fastEthernet 0/2", desc: "IT-PC", vlan: 20 }
+        - { port: "fastEthernet 0/3", desc: "FINANCE-PC", vlan: 30 }
+        - { port: "fastEthernet 0/4", desc: "MANAGEMENT-PC", vlan: 40 }
+      when: inventory_hostname == "switch"
+
+    - name: "[SWITCH] Configure Trunk to Router"
+      ios_config:
+        parents: "interface fastEthernet 0/5"
+        lines:
+          - description TRUNK-TO-ISR4321
+          - switchport mode trunk
+          - switchport trunk allowed vlan 10,20,30,40
+      when: inventory_hostname == "switch"
+
+    - name: "[SWITCH] Security - Shutdown Unused Ports"
+      ios_config:
+        parents: "interface range fastEthernet 0/6 - 23"
+        lines:
+          - description UNUSED-DISABLED
+          - shutdown
+      when: inventory_hostname == "switch"
+
+    - name: "[SWITCH] Security - Local User & Encryption"
+      ios_config:
+        lines:
+          - username admin privilege 15 secret Netsec112211
+          - service password-encryption
+      when: inventory_hostname == "switch"
+
+    - name: "[SWITCH] Security - MOTD Banner"
+      ios_banner:
+        banner: motd
+        text: |
+          UNAUTHORIZED ACCESS IS STRICTLY PROHIBITED.
+          ALL ACTIVITY IS MONITORED AND LOGGED.
+        state: present
+      when: inventory_hostname == "switch"
+
+    - name: "[SWITCH] Save Configuration"
+      ios_command:
+        commands: write memory
+      when: inventory_hostname == "switch"
+
+    # ==========================================
+    # ROUTER CONFIGURATION (ISR4321)
+    # ==========================================
+    - name: "[ROUTER] Configure Hostname"
+      ios_config:
+        lines:
+          - hostname RT-BRANCH-01
+      when: inventory_hostname == "router"
+
+    - name: "[ROUTER] Enable Physical Interface"
+      ios_config:
+        parents: "interface gigabitEthernet 0/0/0"
+        lines:
+          - description TRUNK-TO-SWITCH
+          - no shutdown
+      when: inventory_hostname == "router"
+
+    - name: "[ROUTER] Configure Sub-Interfaces"
+      ios_config:
+        parents: "interface gigabitEthernet 0/0/0.{{ item.vlan }}"
+        lines:
+          - "description {{ item.desc }}"
+          - "encapsulation dot1Q {{ item.vlan }}"
+          - "ip address {{ item.ip }} 255.255.255.0"
+          - "ip access-group {{ item.acl }} in"
+      loop:
+        - { vlan: 10, desc: "HR-GATEWAY", ip: "192.168.10.1", acl: "ACL-HR-IN" }
+        - { vlan: 20, desc: "IT-GATEWAY", ip: "192.168.20.1", acl: "ACL-IT-IN" }
+        - { vlan: 30, desc: "FINANCE-GATEWAY", ip: "192.168.30.1", acl: "ACL-FINANCE-IN" }
+        - { vlan: 40, desc: "MANAGEMENT-GATEWAY", ip: "192.168.40.1", acl: "ACL-MGMT-IN" }
+      when: inventory_hostname == "router"
+
+    - name: "[ROUTER] Security - ACLs"
+      ios_config:
+        lines: "{{ item }}"
+      loop:
+        - ip access-list extended ACL-HR-IN
+        - permit ip 192.168.10.0 0.0.0.255 192.168.20.0 0.0.0.255
+        - permit ip 192.168.10.0 0.0.0.255 192.168.40.0 0.0.0.255
+        - deny ip 192.168.10.0 0.0.0.255 192.168.30.0 0.0.0.255
+        - permit ip any any
+        - ip access-list extended ACL-FINANCE-IN
+        - permit ip 192.168.30.0 0.0.0.255 192.168.20.0 0.0.0.255
+        - permit ip 192.168.30.0 0.0.0.255 192.168.40.0 0.0.0.255
+        - deny ip 192.168.30.0 0.0.0.255 192.168.10.0 0.0.0.255
+        - permit ip any any
+        - ip access-list extended ACL-IT-IN
+        - permit ip 192.168.20.0 0.0.0.255 any
+        - ip access-list extended ACL-MGMT-IN
+        - permit ip 192.168.40.0 0.0.0.255 any
+      when: inventory_hostname == "router"
+
+    - name: "[ROUTER] Security - SSH"
+      ios_config:
+        lines:
+          - ip domain-name enterprise.local
+          - crypto key generate rsa 1024
+          - username admin privilege 15 secret Netsec112211
+      when: inventory_hostname == "router"
+
+    - name: "[ROUTER] Security - VTY Lines"
+      ios_config:
+        parents: "line vty 0 15"
+        lines:
+          - login local
+          - transport input ssh
+      when: inventory_hostname == "router"
+
+    - name: "[ROUTER] Security - Enable Secret & Encryption"
+      ios_config:
+        lines:
+          - enable secret Netsec112211
+          - service password-encryption
+      when: inventory_hostname == "router"
+
+    - name: "[ROUTER] Security - MOTD Banner"
+      ios_banner:
+        banner: motd
+        text: |
+          UNAUTHORIZED ACCESS IS STRICTLY PROHIBITED.
+          ALL ACTIVITY IS MONITORED AND LOGGED.
+        state: present
+      when: inventory_hostname == "router"
+
+    - name: "[ROUTER] Save Configuration"
+      ios_command:
+        commands: write memory
+      when: inventory_hostname == "router"
